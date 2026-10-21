@@ -1,0 +1,240 @@
+---
+title: "Are Bo District's rice seasons changing?"
+subtitle: "Testing farmers' climate reports against 45 years of satellite rainfall, vegetation, yield and price data"
+author: "Mohamed Lamin Mansaray"
+date: today
+date-format: "MMMM YYYY"
+format:
+  html:
+    toc: true
+    number-sections: true
+    embed-resources: true
+    fig-width: 8
+  docx:
+    toc: false
+    number-sections: true
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r setup}
+library(readr)
+library(dplyr)
+
+tab <- function(name) read_csv(file.path("output/tables", name), show_col_types = FALSE)
+
+trends   <- tab("rainfall_trends_bo.csv")
+indices  <- tab("rainfall_indices_by_year.csv")
+veg_cor  <- tab("ndvi_rainfall_correlations.csv")
+scores   <- tab("model_scores.csv")
+coefs    <- tab("regression_coefficients.csv")
+pattern  <- tab("price_seasonal_pattern.csv")
+yield    <- tab("yield_with_trend.csv")
+price_tests <- if (file.exists("output/tables/price_rainfall_tests.csv")) tab("price_rainfall_tests.csv") else NULL
+
+# Small helpers so numbers in the text update automatically
+tr  <- function(i) filter(trends, index == i)
+num <- function(x, d = 1) formatC(x, format = "f", digits = d, big.mark = ",")
+pv  <- function(p) ifelse(p < 0.001, "p < 0.001", paste0("p = ", num(p, 2)))
+sig_words <- function(p) ifelse(p < 0.05, "a statistically significant", "no statistically significant")
+score <- function(m, per = "All years") filter(scores, model == m, period == per)
+
+bo <- filter(indices, region == "Bo")
+example_used <- if (file.exists("output/example_data_used.txt")) readLines("output/example_data_used.txt") else character(0)
+```
+
+```{r example-warning, results = "asis"}
+if (length(example_used) > 0) {
+  cat("::: {.callout-warning}\n## Example data in use\n",
+      "These files were **made-up example data**, not real observations: ",
+      paste(example_used, collapse = ", "),
+      ". The numbers and graphs below are meaningless until the real files are placed in `data/raw/` and the analysis is re-run.\n:::\n")
+}
+```
+
+# Summary
+
+Rice is Sierra Leone's staple food, and most of it is grown by smallholders who depend entirely on rain. In my 2026 survey of 50 rice farmers in Bo District, 60% said they had noticed changes in the weather, with floods, longer dry spells and unpredictable seasons among their concerns. This project asks whether the satellite record backs up what farmers report, and whether rainfall can explain changes in rice yields and prices. I combined `r min(bo$year)`–`r max(bo$year)` daily satellite rainfall (CHIRPS), 2000–2025 vegetation greenness (MODIS NDVI), national rice yields (FAOSTAT) and Bo market rice prices (WFP). The whole analysis is reproducible from one R script.
+
+::: {.callout-note}
+## ✍️ To write after seeing the real results
+Two or three sentences with the main findings: did rainfall change, does greenness follow rainfall, does weather explain yields, how strong is the price cycle?
+:::
+
+# Question and motivation
+
+My MSc thesis (UCD, 2026) found that **climate pressures** were among the challenges reported by smallholder rice farmers in Bo District: 44% named floods or drought as a major problem, and key informants described swamp farmers being flooded more often. However, the climate evidence for Sierra Leone is mostly national, and farmers' perceptions have rarely been checked against measured data at district level.
+
+This project asks four questions:
+
+- **A. Rainfall:** Has Bo's rainy season changed since 1981 in onset, dry spells, total rainfall or heavy rain?
+- **B. Vegetation:** Do poor rainfall seasons show up as lower farmland greenness from space?
+- **C. Yields:** Can seasonal rainfall explain year-to-year changes in national rice yield, and does machine learning beat simple regression?
+- **D. Prices:** How strong is the seasonal rice price cycle in Bo, and is the lean-season price rise larger after a poor rainy season?
+
+# Data
+
+| Dataset | What it measures | Coverage | Source |
+|---|---|---|---|
+| CHIRPS v2.0 | Daily rainfall, ~5 km | 1981–2025 | Funk et al. (2015), via Google Earth Engine |
+| MODIS MOD13Q1 v6.1 | 16-day NDVI and EVI, 250 m | 2000–2025 | NASA LP DAAC, via Google Earth Engine |
+| ESA WorldCover 2021 | Land cover, 10 m (farmland mask) | 2021 | Zanaga et al. (2022) |
+| FAOSTAT QCL | National rice yield (t/ha) | `r min(yield$year)`–`r max(yield$year)` | FAO |
+| WFP market prices | Monthly retail rice prices, Bo market | varies | WFP via HDX |
+| Field survey | Farmers' perceptions of climate change (N = 50) | 2026 | Own data (MSc thesis) |
+
+Satellite data were extracted for Bo District (FAO GAUL boundaries) in Google Earth Engine. All cleaning and analysis was done in R. Vegetation was measured only over farmland, defined as 250 m pixels that are at least half cropland or herbaceous wetland in ESA WorldCover, so that forest does not dominate the signal.
+
+# Methods
+
+**Rainfall indices (Part A).** From daily rainfall I calculated, for every year:
+
+- **onset**: the first day after 1 April with ≥ 20 mm over 3 days and no dry spell of 7+ days in the following 30 days (Sivakumar, 1988)
+- **end of season**
+- the **longest dry spell in the 40 days after onset**, when seedlings are most vulnerable
+- **May–October total**
+- the **wettest 5-day total** (Rx5day, a flood indicator)
+- the number of **very heavy rain days**, above the 95th percentile of 1991–2020 rainy days
+- the seasonal **Standardised Precipitation Index** (SPI)
+
+Trends were tested with the **Mann–Kendall test** and sized with **Sen's slope**. Both are robust to outliers and make no assumption of normality. I also compared the last decade (2016–2025) with the 1991–2020 climate normal.
+
+**Vegetation (Part B).** Images were kept only if at least 30% of farmland was cloud-free. I averaged late-season NDVI (October–December, around harvest) for each year and correlated it with that year's rainfall indices (Pearson and Spearman).
+
+**Yield models (Part C).** I removed the long-term trend from yields with a LOESS smoother, so that the models explain only year-to-year anomalies (% from trend). Three models predicted these anomalies from national rainfall indices:
+
+- a no-skill baseline that always predicts the average
+- multiple linear regression
+- a random forest
+
+Each model was tested with **leave-one-year-out cross-validation**: every year is predicted by a model that never saw it. The models are compared on root-mean-square error (RMSE). As a robustness check, I repeated the comparison for the post-war period only (2003 onwards).
+
+**Prices (Part D).** To remove inflation, each month's price was divided by a centred 12-month moving average, leaving the seasonal pattern. The **lean-season premium** for each year is the July–September price index minus the preceding October–December index. I compared it with the previous year's rainfall using Spearman correlation.
+
+# Findings
+
+## A. Has the rainy season changed?
+
+![Average daily rainfall through the year in Bo, 1991–2020 normal vs the last decade.](../output/figures/A1_season_shape.png)
+
+![Yearly rainfall indices, 1981–2025, with Sen's slope trend lines.](../output/figures/A2_rainfall_trends.png)
+
+Onset showed `r sig_words(tr("onset_doy")$p_value)` trend (Sen's slope `r num(tr("onset_doy")$sen_slope_decade)` days per decade, `r pv(tr("onset_doy")$p_value)`). The longest early-season dry spell showed `r sig_words(tr("early_dry_spell")$p_value)` trend (`r num(tr("early_dry_spell")$sen_slope_decade)` days per decade, `r pv(tr("early_dry_spell")$p_value)`). May–October rainfall averaged `r num(tr("season_total")$baseline_mean, 0)` mm in 1991–2020 and `r num(tr("season_total")$recent_mean, 0)` mm in 2016–2025 (trend `r pv(tr("season_total")$p_value)`). The wettest 5-day total changed by `r num(tr("rx5day")$sen_slope_decade)` mm per decade (`r pv(tr("rx5day")$p_value)`).
+
+```{r trend-table}
+trends %>%
+  transmute(Index = label,
+            `1991–2020 mean` = num(baseline_mean),
+            `2016–2025 mean` = num(recent_mean),
+            `Sen's slope / decade` = num(sen_slope_decade, 2),
+            `Mann–Kendall p` = num(p_value, 3)) %>%
+  knitr::kable(caption = "Rainfall indices for Bo District: trends and recent change.")
+```
+
+![What farmers reported (left) next to the measured change in the last decade (right).](../output/figures/A3_farmers_vs_satellite.png)
+
+::: {.callout-note}
+## ✍️ Interpretation
+Do the data agree with farmers? Note where they agree, where they don't, and possible reasons. For example, perceptions may reflect single extreme years, local flooding in swamps that a district average smooths out, or non-climate changes such as soil fertility.
+:::
+
+## B. Does greenness follow rainfall?
+
+![Farmland greenness through the year (top) and how often clouds hide the land (bottom).](../output/figures/B1_greenness_cycle.png)
+
+![Late-season greenness against that year's rainfall indices, 2000–2025.](../output/figures/B2_greenness_vs_rainfall.png)
+
+```{r veg-table}
+veg_cor %>%
+  transmute(`Rainfall index` = rain_index, Years = n_years,
+            `Spearman rho` = num(spearman_rho, 2), p = num(spearman_p, 3)) %>%
+  knitr::kable(caption = "Correlation between late-season NDVI and rainfall indices.")
+```
+
+![Location of Bo District and late-season greenness across the district.](../output/figures/B3_maps.png)
+
+::: {.callout-note}
+## ✍️ Interpretation
+Is greenness linked to rainfall? Comment on the cloud gap during the main growing months (July–September). It is a key reason optical satellites struggle in humid West Africa.
+:::
+
+## C. Can rainfall explain rice yields?
+
+![National rice yield and its long-term trend. Hollow points are estimated, not official, figures.](../output/figures/C1_yield_trend.png)
+
+![Leave-one-year-out predictions (top), prediction error (bottom left) and random-forest variable importance (bottom right).](../output/figures/C2_model_comparison.png)
+
+On years they had not seen, the models produced the following errors:
+
+- **Linear regression:** RMSE of `r num(score("Linear regression")$RMSE)` percentage points
+- **Random forest:** RMSE of `r num(score("Random forest")$RMSE)` percentage points
+- **No-skill baseline:** RMSE of `r num(score("No-skill baseline")$RMSE)` percentage points
+
+In the post-war period, the RMSEs were `r num(score("Linear regression", "2003 onwards")$RMSE)`, `r num(score("Random forest", "2003 onwards")$RMSE)` and `r num(score("No-skill baseline", "2003 onwards")$RMSE)` respectively.
+
+```{r score-table}
+scores %>%
+  transmute(Period = period, Model = model, RMSE = num(RMSE, 2), MAE = num(MAE, 2),
+            `Skill vs baseline` = paste0(num(100 * skill_vs_baseline, 0), "%")) %>%
+  knitr::kable(caption = "Leave-one-year-out performance. Skill = % reduction in RMSE vs the no-skill baseline.")
+```
+
+::: {.callout-note}
+## ✍️ Interpretation
+Did either model beat the baseline? With about 40 national data points, complex models easily overfit. If the regression shows "significant" coefficients but no cross-validated skill, explain why cross-validation is the more honest test. National yields also mix upland and swamp systems and many FAOSTAT values are estimates.
+:::
+
+## D. Rice prices and the farming calendar
+
+![Retail rice prices in Bo market (top) and the typical seasonal pattern (bottom).](../output/figures/D1_rice_prices.png)
+
+```{r price-numbers}
+local <- pattern %>% filter(grepl("local", commodity, ignore.case = TRUE))
+if (nrow(local) == 0) local <- filter(pattern, commodity == first(commodity))
+peak   <- local %>% slice_max(mean_index, n = 1)
+trough <- local %>% slice_min(mean_index, n = 1)
+```
+
+For `r tolower(first(local$commodity))`, prices typically peak in **`r month.name[peak$month]`** (`r num((peak$mean_index - 1) * 100)`% above the annual level). They are lowest in **`r month.name[trough$month]`** (`r num((trough$mean_index - 1) * 100)`%), a swing of about `r num((peak$mean_index - trough$mean_index) * 100, 0)` percentage points within the year.
+
+`r if (!is.null(price_tests)) paste0("Across ", price_tests$n_years[1], " years, the lean-season price rise was ", ifelse(price_tests$p_value[1] < 0.05, "", "not "), "significantly correlated with the previous season's rainfall (Spearman rho = ", num(price_tests$spearman_rho[1], 2), ", ", pv(price_tests$p_value[1]), ").") else "Too few years of price data were available to test the link with rainfall."`
+
+![Lean-season price rise against the previous year's rainfall.](../output/figures/D2_price_vs_rainfall.png)
+
+::: {.callout-note}
+## ✍️ Interpretation
+Link this to the thesis: farmers who sell straight after harvest sell at the lowest price and buy back at the highest. What does the size of this swing mean for storage, credit or warehouse receipt schemes?
+:::
+
+# Limitations
+
+- **Spatial averaging.** District-average rainfall smooths out local storms and flooding. Swamp flooding depends on runoff from surrounding slopes, not only on rain falling on the swamp.
+- **CHIRPS accuracy.** CHIRPS uses few rain gauges in Sierra Leone, so it may miss local extremes.
+- **Clouds.** Optical satellites see very little of Bo's farmland from July to September, the main growing period. This is why late-season NDVI was used. Radar satellites such as Sentinel-1 can see through cloud and would address this.
+- **Farmland mask.** ESA WorldCover does not separate rice from other crops, or upland rice from swamp rice.
+- **Yield data.** Yields are national, short (about 40 years) and partly estimated, especially during the 1991–2002 civil war. Year-to-year variation also reflects inputs, prices, pests and policy, not only weather.
+- **Statistical models, not crop models.** Regression and random forests find associations. A process-based crop model (e.g. DSSAT or APSIM/ORYZA) would represent how water, temperature, soil and management affect rice growth. It could test *why* a dry spell after planting reduces yield.
+- **Survey vs data.** The survey asked about perceived change with no fixed time period. The 2016–2025 window is my assumption.
+
+# Next steps and link to further research
+
+This project shows that free satellite data can describe Bo's rainy season in a way that connects to what farmers experience. The weakest links are the coarse yield data and the cloud gap. Both point to the same research direction: combining **radar and optical satellite imagery, gridded weather data and field observations** from farmers to monitor rice in inland valley swamps. The aim is to give farmers and extension services earlier warnings about planting dates, dry spells and floods.
+
+::: {.callout-note}
+## ✍️ Personalise
+One or two sentences on the research question he would like to pursue in the PhD, and how his fieldwork with Bo farmers helps.
+:::
+
+# Reproducibility
+
+All code is in the project repository. Running `source("R/run_all.R")` rebuilds every table, figure and this report from the raw data. The Google Earth Engine extraction script is in `gee/01_export_data.js`. Package versions are in `output/session_info.txt`.
+
+# References
+
+- Funk, C. et al. (2015) 'The climate hazards infrared precipitation with stations — a new environmental record for monitoring extremes', *Scientific Data*, 2, 150066.
+- McKee, T.B., Doesken, N.J. and Kleist, J. (1993) 'The relationship of drought frequency and duration to time scales', *8th Conference on Applied Climatology*, Anaheim, CA.
+- Sen, P.K. (1968) 'Estimates of the regression coefficient based on Kendall's tau', *Journal of the American Statistical Association*, 63(324), pp. 1379–1389.
+- Sivakumar, M.V.K. (1988) 'Predicting rainy season potential from the onset of rains in Southern Sahelian and Sudanian climatic zones of West Africa', *Agricultural and Forest Meteorology*, 42(4), pp. 295–305.
+- Zanaga, D. et al. (2022) *ESA WorldCover 10 m 2021 v200*. Zenodo. doi:10.5281/zenodo.7254221.
